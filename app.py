@@ -18,13 +18,13 @@ def init_supabase() -> Client:
 
 supabase = init_supabase()
 
-st.set_page_config(page_title="Finanças Pessoais", page_icon="💶", layout="wide")
+st.set_page_config(page_title="Finanças Pessoais", page_icon="💶", layout="wide", initial_sidebar_state="collapsed")
 
 # Função auxiliar para formatar moeda em Euro (€)
 def fmt_euro(valor: float) -> str:
     return f"€ {valor:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
 
-# 3. Funções de Busca
+# 3. Funções de Busca com Paginação para Superar Limite de 1000 Linhas
 @st.cache_data(ttl=60)
 def carregar_tipos():
     response = supabase.table("tipos").select("id, nome").execute()
@@ -36,7 +36,6 @@ def carregar_naturezas():
     return pd.DataFrame(response.data)
 
 def carregar_transacoes():
-    # Busca todas as transações sem o limite padrão de 1000 linhas
     todas_transacoes = []
     tamanho_pagina = 1000
     inicio = 0
@@ -96,19 +95,48 @@ def carregar_recorrentes():
 def recarregar_dados():
     st.cache_data.clear()
 
-st.title("💶 Controle de Finanças Pessoais")
-st.markdown("---")
+st.title("💶 Controle Financeiro")
 
 df_tipos = carregar_tipos()
 df_naturezas = carregar_naturezas()
 dict_tipos = dict(zip(df_tipos['nome'], df_tipos['id']))
 dict_naturezas = dict(zip(df_naturezas['nome'], df_naturezas['id']))
 
-# Abas do sistema
-tab_dash, tab_novo, tab_gestao, tab_metas, tab_recorrentes, tab_cats, tab_import = st.tabs([
-    "📊 Dashboard", "➕ Novo Lançamento", "✏️ Editar/Eliminar", 
-    "🎯 Metas & Orçamentos", "🔄 Recorrentes/Fixos", "🏷️ Categorias", "📁 Importar/Exportar"
+# Abas otimizadas para mobile (Lançamento Rápido em primeiro lugar)
+tab_rapido, tab_dash, tab_novo, tab_gestao, tab_metas, tab_recorrentes, tab_cats, tab_import = st.tabs([
+    "⚡ Lançamento Rápido", "📊 Dashboard", "➕ Completo", "✏️ Editar/Eliminar", 
+    "🎯 Metas", "🔄 Fixos", "🏷️ Categorias", "📁 Importar/Exportar"
 ])
+
+# ---------------------------------------------------------
+# ABA 0: LANÇAMENTO RÁPIDO (MOBILE FIRST)
+# ---------------------------------------------------------
+with tab_rapido:
+    st.subheader("⚡ Registro Rápido")
+    st.caption("Ideal para adicionar lançamentos direto do telemóvel.")
+    
+    with st.form("form_rapido_mobile", clear_on_submit=True):
+        tipo_r = st.radio("Tipo", ["Despesa", "Receita"], horizontal=True)
+        valor_r = st.number_input("Valor (€)", min_value=0.01, step=1.0, format="%.2f")
+        cat_r = st.selectbox("Categoria / Natureza", list(dict_naturezas.keys()), key="cat_r_m")
+        origem_r = st.text_input("Local / Estabelecimento", placeholder="Ex: Café, Pingo Doce...")
+        data_r = st.date_input("Data", value=datetime.now().date(), format="DD/MM/YYYY")
+        desc_r = st.text_input("Descrição (Opcional)")
+        
+        btn_rapido = st.form_submit_button("🚀 Salvar Lançamento", use_container_width=True)
+        
+        if btn_rapido:
+            payload = {
+                "data_transacao": str(data_r),
+                "tipo_id": dict_tipos[tipo_r],
+                "natureza_id": dict_naturezas[cat_r],
+                "origem": origem_r if origem_r.strip() else "Não Especificado",
+                "descricao": desc_r,
+                "valor": float(valor_r)
+            }
+            supabase.table("transacoes").insert(payload).execute()
+            st.success(f"✅ {tipo_r} de {fmt_euro(valor_r)} cadastrada com sucesso!")
+            recarregar_dados()
 
 # ---------------------------------------------------------
 # ABA 1: DASHBOARD
@@ -120,7 +148,7 @@ with tab_dash:
         st.info("Nenhuma transação encontrada no banco de dados.")
     else:
         st.subheader("🔍 Filtros de Análise")
-        c_f1, c_f2, c_f3 = st.columns(3)
+        c_f1, c_f2, c_f3 = st.columns([1, 1, 1])
         
         with c_f1:
             visao_temporal = st.selectbox("Período:", ["Mensal Específico", "Ano Atual (YTD)", "Últimos 12 Meses (L12M)", "Todo o Histórico"])
@@ -198,6 +226,7 @@ with tab_dash:
             else:
                 df_cat = df_despesas.groupby('natureza')['valor'].sum().reset_index()
                 fig_pie = px.pie(df_cat, values='valor', names='natureza', hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
+                fig_pie.update_layout(margin=dict(l=10, r=10, t=30, b=10))
                 st.plotly_chart(fig_pie, use_container_width=True)
                 
         with col_graf2:
@@ -207,7 +236,7 @@ with tab_dash:
             df_grouped = df_evol.groupby(['ano_mes', 'tipo'])['valor'].sum().reset_index()
             if not df_grouped.empty:
                 fig_bar = px.bar(df_grouped, x='ano_mes', y='valor', color='tipo', barmode='group', color_discrete_map={'Receita': '#2ecc71', 'Despesa': '#e74c3c'})
-                fig_bar.update_layout(yaxis_title="Valor (€)")
+                fig_bar.update_layout(yaxis_title="Valor (€)", margin=dict(l=10, r=10, t=30, b=10))
                 st.plotly_chart(fig_bar, use_container_width=True)
 
         st.markdown("---")
@@ -220,10 +249,10 @@ with tab_dash:
         st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
-# ABA 2: NOVO LANÇAMENTO
+# ABA 2: NOVO LANÇAMENTO COMPLETO
 # ---------------------------------------------------------
 with tab_novo:
-    st.subheader("➕ Novo Lançamento")
+    st.subheader("➕ Novo Lançamento Completo")
     with st.form("form_transacao", clear_on_submit=True):
         c1, c2 = st.columns(2)
         with c1:
@@ -294,7 +323,7 @@ with tab_metas:
         limite_meta = st.number_input("Limite de Gasto (€)", min_value=10.0, step=50.0, format="%.2f")
         
         c_btn1, c_btn2 = st.columns(2)
-        if c_btn1.button("💾 Salvar / Atualizar Meta", use_container_width=True):
+        if c_btn1.button("💾 Salvar Meta", use_container_width=True):
             data_meta = {
                 "natureza_id": dict_naturezas[cat_meta],
                 "ano_mes": ano_mes_meta,
@@ -305,15 +334,9 @@ with tab_metas:
             recarregar_dados()
             st.rerun()
 
-        if c_btn2.button("🗑️ Eliminar Meta da Categoria", use_container_width=True):
-            res_del = (
-                supabase.table("orcametos")
-                .delete()
-                .eq("natureza_id", dict_naturezas[cat_meta])
-                .eq("ano_mes", ano_mes_meta)
-                .execute()
-            )
-            st.success(f"Meta para '{cat_meta}' do mês {ano_mes_meta} foi removida com sucesso!")
+        if c_btn2.button("🗑️ Eliminar Meta", use_container_width=True):
+            supabase.table("orcametos").delete().eq("natureza_id", dict_naturezas[cat_meta]).eq("ano_mes", ano_mes_meta).execute()
+            st.success(f"Meta removida com sucesso!")
             recarregar_dados()
             st.rerun()
             
@@ -326,7 +349,7 @@ with tab_metas:
             df_m_exist_exib.columns = ['Categoria', 'Teto Máximo (€)']
             st.dataframe(df_m_exist_exib, use_container_width=True, hide_index=True)
         else:
-            st.info(f"Nenhuma meta cadastrada para o mês {ano_mes_meta}.")
+            st.info(f"Nenhuma meta cadastrada para {ano_mes_meta}.")
 
 # ---------------------------------------------------------
 # ABA 5: DESPESAS RECORRENTES / FIXAS
@@ -418,17 +441,16 @@ with tab_import:
     
     col_imp, col_exp = st.columns(2)
     
-    # IMPORTAÇÃO EM LOTE
     with col_imp:
         st.markdown("### 📥 Importar Lançamentos em Lote")
         st.markdown("""
         Suba seu arquivo Excel (`.xlsx` ou `.xls`) ou CSV contendo as colunas:
-        * `data_transacao` *(Ex: 2026-09-15 ou 15/09/2026)*
+        * `data_transacao`
         * `tipo` *(Receita ou Despesa)*
-        * `natureza` *(Ex: Alimentação, Moradia)*
-        * `origem` *(Ex: Supermercado Continente)*
-        * `descricao` *(Ex: Compras da semana)*
-        * `valor` *(Ex: 45.80)*
+        * `natureza`
+        * `origem`
+        * `descricao`
+        * `valor`
         """)
         
         uploaded_file = st.file_uploader("Selecione o ficheiro Excel ou CSV", type=["xlsx", "csv"])
@@ -439,6 +461,8 @@ with tab_import:
                     df_up = pd.read_csv(uploaded_file)
                 else:
                     df_up = pd.read_excel(uploaded_file)
+                
+                df_up.columns = df_up.columns.astype(str).str.strip()
                 
                 st.write("🔍 **Pré-visualização dos dados:**")
                 st.dataframe(df_up.head(5), use_container_width=True)
@@ -452,24 +476,21 @@ with tab_import:
                         total_rows = len(df_up)
                         inseridos = 0
                         
-                        # Atualiza mapa de naturezas
                         dict_nat_local = dict_naturezas.copy()
                         
                         for idx, row in df_up.iterrows():
                             cat_nome = str(row['natureza']).strip()
                             
-                            # Se a categoria não existir no banco, insere automaticamente
                             if cat_nome not in dict_nat_local:
                                 res_cat = supabase.table("naturezas").insert({"nome": cat_nome}).execute()
                                 if res_cat.data:
                                     dict_nat_local[cat_nome] = res_cat.data[0]['id']
                             
-                            # Trata data
                             data_val = pd.to_datetime(row['data_transacao']).strftime('%Y-%m-%d')
                             
                             payload = {
                                 "data_transacao": data_val,
-                                "tipo_id": dict_tipos.get(str(row['tipo']).strip(), 2), # Default despesa se falhar
+                                "tipo_id": dict_tipos.get(str(row['tipo']).strip(), 2),
                                 "natureza_id": dict_nat_local.get(cat_nome),
                                 "origem": str(row['origem']) if pd.notna(row['origem']) else "Não Especificado",
                                 "descricao": str(row['descricao']) if 'descricao' in row and pd.notna(row['descricao']) else "",
@@ -485,17 +506,15 @@ with tab_import:
             except Exception as e:
                 st.error(f"Erro ao processar o arquivo: {e}")
 
-    # EXPORTAÇÃO EM MASSA
     with col_exp:
         st.markdown("### 📤 Exportar Histórico Completo")
-        st.markdown("Faça o download do seu banco de dados completo filtrado ou integral em formato CSV ou Excel.")
+        st.markdown("Faça o download do seu banco de dados completo em formato CSV.")
         
         df_exp = carregar_transacoes()
         if not df_exp.empty:
             df_exp_clean = df_exp[['id', 'data_transacao', 'tipo', 'natureza', 'origem', 'valor', 'descricao']].copy()
             df_exp_clean['data_transacao'] = df_exp_clean['data_transacao'].dt.strftime('%Y-%m-%d')
             
-            # Exportar CSV
             csv_data = df_exp_clean.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Baixar como CSV",
