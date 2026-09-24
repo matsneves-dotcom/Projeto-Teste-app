@@ -1,0 +1,12 @@
+# Segurança (NUNCA subir chaves de API para o GitHub público ou privado)
+.env
+
+# Ambientes virtuais e cache do Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Cache local do Streamlit
+.streamlit/
