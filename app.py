@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from supabase import create_client, Client
 from google import genai
+import yfinance as yf
 
 # ---------------------------------------------------------
 # 1. CONFIGURAÇÃO INICIAL E VARIÁVEIS DE AMBIENTE
@@ -37,6 +38,9 @@ supabase = obter_cliente_supabase()
 def fmt_euro(valor: float) -> str:
     return f"€ {valor:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
 
+def fmt_brl(valor: float) -> str:
+    return f"R$ {valor:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
+
 def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
     ano = dt_referencia.year
     mes = dt_referencia.month
@@ -58,6 +62,29 @@ def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
 
 def recarregar_dados():
     st.cache_data.clear()
+
+def buscar_cotacao_b3(ticker: str) -> float:
+    """Busca a cotação atual do ticker na B3 via Yahoo Finance."""
+    ticker_clean = ticker.strip().upper()
+    if not ticker_clean.endswith(".SA"):
+        ticker_search = f"{ticker_clean}.SA"
+    else:
+        ticker_search = ticker_clean
+        
+    try:
+        stock = yf.Ticker(ticker_search)
+        hist = stock.history(period="1d")
+        if not hist.empty:
+            return float(hist['Close'].iloc[-1])
+        
+        info = stock.info
+        if 'currentPrice' in info:
+            return float(info['currentPrice'])
+        elif 'regularMarketPrice' in info:
+            return float(info['regularMarketPrice'])
+    except Exception:
+        pass
+    return 0.0
 
 # ---------------------------------------------------------
 # 4. CONSULTAS AO BANCO DE DADOS (SUPABASE)
@@ -155,6 +182,37 @@ def atualizar_valor_cofre(cofre_id, novo_valor):
         st.error(f"Erro ao atualizar cofre: {e}")
         return False
 
+def carregar_acoes():
+    try:
+        res = supabase.table("acoes").select("*").order("ticker").execute()
+        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro ao carregar ações: {e}")
+        return pd.DataFrame()
+
+def upsert_acao(ticker, nome_empresa, quantidade, preco_medio, cotacao_atual=0.0):
+    try:
+        data = {
+            "ticker": ticker.upper().strip(),
+            "nome_empresa": nome_empresa,
+            "quantidade": float(quantidade),
+            "preco_medio": float(preco_medio),
+            "cotacao_atual": float(cotacao_atual)
+        }
+        supabase.table("acoes").upsert(data, on_conflict="ticker").execute()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar ação: {e}")
+        return False
+
+def deletar_acao(ticker_id):
+    try:
+        supabase.table("acoes").delete().eq("id", ticker_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao remover ação: {e}")
+        return False
+
 # Carregamento prévio de opções estáticas
 df_tipos = carregar_tipos()
 df_naturezas = carregar_naturezas()
@@ -177,6 +235,7 @@ OPCOES_MENU = [
     "🎯 Metas & Orçamentos",
     "🔄 Lançamentos Fixos",
     "🏦 Investimentos & Reservas",
+    "📈 Ações & B3",
     "🏷️ Categorias",
     "📁 Importar/Exportar"
 ]
@@ -305,6 +364,10 @@ if st.session_state.pagina_atual == "🏠 Início":
             st.rerun()
 
     with col2:
+        if st.button("📈 **Carteira B3**\n\nControlar ações e ativos", use_container_width=True):
+            st.session_state.pagina_atual = "📈 Ações & B3"
+            st.rerun()
+
         if st.button("🤖 **Inteligência & IA**\n\nGerar relatórios preditivos com IA", use_container_width=True):
             st.session_state.pagina_atual = "🤖 Inteligência & IA"
             st.rerun()
@@ -315,10 +378,6 @@ if st.session_state.pagina_atual == "🏠 Início":
 
         if st.button("✏️ **Editar / Eliminar**\n\nCorrigir lançamentos", use_container_width=True):
             st.session_state.pagina_atual = "✏️ Editar/Eliminar"
-            st.rerun()
-
-        if st.button("🔄 **Gastos/Receitas Fixas**\n\nContas recorrentes mensais", use_container_width=True):
-            st.session_state.pagina_atual = "🔄 Lançamentos Fixos"
             st.rerun()
 
 # ---------------------------------------------------------
@@ -385,7 +444,6 @@ elif st.session_state.pagina_atual == "🤖 Inteligência & IA":
         st.markdown("---")
         st.markdown("### 🔮 Gerar Análise de Saúde Financeira")
         
-        # O BOTÃO DE IA ESTÁ EXCLUSIVAMENTE DENTRO DESSA ABA
         if st.button("✨ Solicitar Análise da IA", use_container_width=True):
             if not GEMINI_API_KEY:
                 st.error("⚠️ Para ativar a IA gratuita, defina a variável `GEMINI_API_KEY` nos Secrets do Streamlit ou no `.env`.")
@@ -782,6 +840,101 @@ elif st.session_state.pagina_atual == "🏦 Investimentos & Reservas":
                             if atualizar_valor_cofre(row['id'], novo_saldo):
                                 st.success("Saldo atualizado com sucesso!")
                                 st.rerun()
+
+# ---------------------------------------------------------
+# PÁGINA: 📈 AÇÕES & B3
+# ---------------------------------------------------------
+elif st.session_state.pagina_atual == "📈 Ações & B3":
+    st.subheader("📈 Gestão de Ações & Posição na B3")
+    st.caption("Acompanhe o número de ações, custo médio, cotação atual e resultado da sua carteira na Bolsa Brasileira.")
+
+    # Formulário para cadastrar ou atualizar ativo
+    with st.expander("➕ Adicionar ou Atualizar Posição de Ação", expanded=False):
+        with st.form("form_acao", clear_on_submit=True):
+            col_a1, col_a2 = st.columns(2)
+            with col_a1:
+                ticker_input = st.text_input("Ticker da Ação (ex: PETR4, VALE3, ITUB4)").upper().strip()
+                nome_empresa_input = st.text_input("Nome da Empresa / Ativo (opcional)")
+            with col_a2:
+                qtd_input = st.number_input("Quantidade de Ações", min_value=0.0, value=100.0, step=1.0)
+                pm_input = st.number_input("Preço Médio de Compra (R$)", min_value=0.0, value=10.0, step=0.1)
+                
+            sub_acao = st.form_submit_button("💾 Salvar Ativo na Carteira", use_container_width=True)
+            if sub_acao:
+                if not ticker_input:
+                    st.warning("Preencha o ticker da ação.")
+                else:
+                    with st.spinner(f"Buscando cotação atual para {ticker_input}..."):
+                        cot_atual = buscar_cotacao_b3(ticker_input)
+                    
+                    if upsert_acao(ticker_input, nome_empresa_input, qtd_input, pm_input, cot_atual):
+                        st.success(f"Posição em {ticker_input} gravada com sucesso!")
+                        st.rerun()
+
+    df_acoes = carregar_acoes()
+
+    if df_acoes.empty:
+        st.info("Nenhuma ação cadastrada na sua carteira. Utilize o formulário acima para adicionar novos ativos!")
+    else:
+        st.markdown("---")
+        col_b1, col_b2 = st.columns([3, 1])
+        with col_b1:
+            st.markdown("### 📊 Minha Carteira B3")
+        with col_b2:
+            if st.button("🔄 Atualizar Cotações (B3)", use_container_width=True):
+                with st.spinner("Atualizando cotações via Yahoo Finance..."):
+                    for _, r_a in df_acoes.iterrows():
+                        cot = buscar_cotacao_b3(r_a['ticker'])
+                        if cot > 0:
+                            upsert_acao(r_a['ticker'], r_a['nome_empresa'], r_a['quantidade'], r_a['preco_medio'], cot)
+                    st.success("Cotações atualizadas!")
+                    st.rerun()
+
+        # Cálculos de posição
+        df_acoes['valor_investido'] = df_acoes['quantidade'] * df_acoes['preco_medio']
+        df_acoes['valor_atual'] = df_acoes['quantidade'] * df_acoes['cotacao_atual']
+        df_acoes['lucro_prejuizo'] = df_acoes['valor_atual'] - df_acoes['valor_investido']
+        df_acoes['rentabilidade_pct'] = df_acoes.apply(
+            lambda r: ((r['valor_atual'] - r['valor_investido']) / r['valor_investido'] * 100) if r['valor_investido'] > 0 else 0,
+            axis=1
+        )
+
+        tot_investido_brl = df_acoes['valor_investido'].sum()
+        tot_atual_brl = df_acoes['valor_atual'].sum()
+        tot_lucro_brl = tot_atual_brl - tot_investido_brl
+        tot_rent_pct = ((tot_atual_brl - tot_investido_brl) / tot_investido_brl * 100) if tot_investido_brl > 0 else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("💰 Total Investido (Custo)", fmt_brl(tot_investido_brl))
+        k2.metric("📈 Valor Atual de Mercado", fmt_brl(tot_atual_brl))
+        k3.metric("📊 Lucro / Prejuízo (R$)", fmt_brl(tot_lucro_brl), delta=f"{tot_lucro_brl:,.2f} R$")
+        k4.metric("🎯 Rentabilidade Global", f"{tot_rent_pct:.2f}%", delta=f"{tot_rent_pct:.2f}%")
+
+        st.markdown("---")
+
+        # Exibição e Remoção de Ações
+        df_display = df_acoes.copy()
+        df_display['quantidade'] = df_display['quantidade'].astype(int)
+        df_display['preco_medio'] = df_display['preco_medio'].apply(fmt_brl)
+        df_display['cotacao_atual'] = df_display['cotacao_atual'].apply(fmt_brl)
+        df_display['valor_investido'] = df_display['valor_investido'].apply(fmt_brl)
+        df_display['valor_atual'] = df_display['valor_atual'].apply(fmt_brl)
+        df_display['lucro_prejuizo'] = df_display['lucro_prejuizo'].apply(fmt_brl)
+        df_display['rentabilidade_pct'] = df_display['rentabilidade_pct'].apply(lambda v: f"{v:.2f}%")
+
+        df_display = df_display[['id', 'ticker', 'nome_empresa', 'quantidade', 'preco_medio', 'cotacao_atual', 'valor_investido', 'valor_atual', 'lucro_prejuizo', 'rentabilidade_pct']]
+        df_display.columns = ['ID', 'Ticker', 'Empresa', 'Qtd.', 'Preço Médio', 'Cotação Atual', 'Total Investido', 'Valor de Mercado', 'Lucro/Prejuízo', 'Retorno (%)']
+
+        st.dataframe(df_display, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        with st.expander("🗑️ Remover Ativo da Carteira"):
+            ticker_del = st.selectbox("Selecione a ação para remover:", df_acoes['ticker'].tolist())
+            if st.button("Eliminar Posição", use_container_width=True):
+                id_del = df_acoes[df_acoes['ticker'] == ticker_del]['id'].values[0]
+                if deletar_acao(id_del):
+                    st.success(f"Ativo {ticker_del} removido!")
+                    st.rerun()
 
 # ---------------------------------------------------------
 # PÁGINA: 🏷️ CATEGORIAS
