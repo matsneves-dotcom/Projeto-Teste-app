@@ -5,11 +5,13 @@ import plotly.express as px
 from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from supabase import create_client, Client
+from google import genai
 
 # 1. Carregar variáveis de ambiente
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Opcional: Adicione a sua chave no .env para ativar a IA
 
 # 2. Conectar ao Supabase
 @st.cache_resource
@@ -30,15 +32,12 @@ def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
     mes = dt_referencia.month
     
     if dt_referencia.day >= dia_provento:
-        # Estamos no ciclo que começou este mês
         dt_inicio = date(ano, mes, dia_provento)
-        # Próximo mês
         if mes == 12:
             dt_fim = date(ano + 1, 1, dia_provento) - timedelta(days=1)
         else:
             dt_fim = date(ano, mes + 1, dia_provento) - timedelta(days=1)
     else:
-        # Estamos no ciclo que começou no mês anterior
         if mes == 1:
             dt_inicio = date(ano - 1, 12, dia_provento)
         else:
@@ -126,6 +125,7 @@ dict_naturezas = dict(zip(df_naturezas['nome'], df_naturezas['id']))
 # Lista das opções do menu
 OPCOES_MENU = [
     "🏠 Início",
+    "🤖 Inteligência & IA",
     "⚡ Lançamento Rápido",
     "📊 Dashboard",
     "➕ Novo Lançamento",
@@ -151,6 +151,7 @@ if st.session_state.pagina_atual == "🏠 Início":
     st.title("💶 Controle Financeiro")
     
     df_transacoes = carregar_transacoes()
+    df_recorrentes = carregar_recorrentes()
     
     # Configuração do dia do provento na Home
     dia_provento = st.number_input("📅 Dia habitual do Salário/Provento:", min_value=1, max_value=28, value=24, step=1)
@@ -158,24 +159,49 @@ if st.session_state.pagina_atual == "🏠 Início":
     if not df_transacoes.empty:
         hoje = datetime.now().date()
         
-        # 1. Saldo Acumulado Histórico (Tudo desde o início)
+        # 1. Saldo Acumulado Histórico
         tot_rec_total = df_transacoes[df_transacoes['tipo'] == 'Receita']['valor'].sum()
         tot_desp_total = df_transacoes[df_transacoes['tipo'] == 'Despesa']['valor'].sum()
         saldo_acumulado = tot_rec_total - tot_desp_total
         
         # 2. Ciclo Salarial Vigente
         dt_inicio_ciclo, dt_fim_ciclo = obter_intervalo_ciclo_salarial(hoje, dia_provento)
-        
         mask_ciclo = (df_transacoes['data_transacao'].dt.date >= dt_inicio_ciclo) & (df_transacoes['data_transacao'].dt.date <= dt_fim_ciclo)
         df_ciclo = df_transacoes[mask_ciclo]
         
         tot_rec_ciclo = df_ciclo[df_ciclo['tipo'] == 'Receita']['valor'].sum()
         tot_desp_ciclo = df_ciclo[df_ciclo['tipo'] == 'Despesa']['valor'].sum()
         saldo_ciclo = tot_rec_ciclo - tot_desp_ciclo
+
+        # 3. MÓDULO PREDITIVO DE INTELIGÊNCIA FINANCEIRA
+        dias_totais_ciclo = max(1, (dt_fim_ciclo - dt_inicio_ciclo).days + 1)
+        dias_decorridos = max(1, (hoje - dt_inicio_ciclo).days + 1)
+        dias_restantes = max(0, (dt_fim_ciclo - hoje).days + 1)
+
+        # Identificar Despesas Fixas Pendentes no Ciclo
+        fixas_pendentes = 0.0
+        if not df_recorrentes.empty:
+            rec_despesas = df_recorrentes[df_recorrentes['tipo'] == 'Despesa']
+            for _, row_r in rec_despesas.iterrows():
+                dia_v = int(row_r['dia_vencimento'])
+                # Verifica se o vencimento está no período restante do ciclo
+                if dia_v >= hoje.day:
+                    ja_pago = df_ciclo[(df_ciclo['tipo'] == 'Despesa') & (df_ciclo['descricao'].str.contains(row_r['descricao'], case=False, na=False))]
+                    if ja_pago.empty:
+                        fixas_pendentes += float(row_r['valor'])
+
+        # Média de Gasto Diário Variável
+        despesas_fixas_nomes = df_recorrentes['descricao'].tolist() if not df_recorrentes.empty else []
+        df_variavel = df_ciclo[(df_ciclo['tipo'] == 'Despesa') & (~df_ciclo['descricao'].isin(despesas_fixas_nomes))]
+        gasto_variavel_total = df_variavel['valor'].sum()
+        media_diaria = gasto_variavel_total / dias_decorridos
         
+        # Projeção de Saldo Final
+        prev_gastos_restantes = (media_diaria * dias_restantes) + fixas_pendentes
+        saldo_previsto_final = saldo_acumulado - prev_gastos_restantes
+
         # Exibição dos KPIs
         st.markdown(f"### 🏦 Saldo Geral da Conta: **{fmt_euro(saldo_acumulado)}**")
-        
         st.caption(f"📊 **Resumo do Ciclo Salarial Atual** ({dt_inicio_ciclo.strftime('%d/%m/%Y')} até {dt_fim_ciclo.strftime('%d/%m/%Y')}):")
         
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
@@ -183,7 +209,45 @@ if st.session_state.pagina_atual == "🏠 Início":
         kpi2.metric("🟢 Receitas do Ciclo", fmt_euro(tot_rec_ciclo))
         kpi3.metric("🔴 Despesas do Ciclo", fmt_euro(tot_desp_ciclo))
         kpi4.metric("💳 Saldo do Ciclo", fmt_euro(saldo_ciclo))
-    
+
+        st.markdown("---")
+        st.subheader("🤖 Diagnóstico Preditivo do Ciclo")
+        p1, p2, p3 = st.columns(3)
+        p1.metric("📌 Fixas Pendentes (Ciclo)", fmt_euro(fixas_pendentes))
+        p2.metric("📉 Média Gasto Diário Variável", f"{fmt_euro(media_diaria)}/dia")
+        p3.metric(
+            "🔮 Previsão Saldo Fim do Ciclo", 
+            fmt_euro(saldo_previsto_final),
+            delta="Saldo Positivo Previsto" if saldo_previsto_final >= 0 else "Alerta: Déficit Previsto",
+            delta_color="normal" if saldo_previsto_final >= 0 else "inverse"
+        )
+
+        # ALERTAS DE ORÇAMENTO DA PÁGINA "METAS & ORÇAMENTOS"
+        ano_mes_atual = hoje.strftime('%Y-%m')
+        df_orc = carregar_orcametos(ano_mes_atual)
+        if not df_orc.empty and not df_ciclo.empty:
+            alertas = []
+            gastos_cat = df_ciclo[df_ciclo['tipo'] == 'Despesa'].groupby('natureza')['valor'].sum().to_dict()
+            
+            for _, row_o in df_orc.iterrows():
+                cat_n = row_o['natureza']
+                limite = row_o['valor_limite']
+                gasto = gastos_cat.get(cat_n, 0.0)
+                pct = (gasto / limite) * 100 if limite > 0 else 0
+                
+                if pct >= 100:
+                    alertas.append(f"🚨 **{cat_n}**: Ultrapassou o teto de orçamento! ({pct:.0f}% utilizado - {fmt_euro(gasto)} de {fmt_euro(limite)})")
+                elif pct >= 80:
+                    alertas.append(f"⚠️ **{cat_n}**: Atingiu {pct:.0f}% do limite ({fmt_euro(gasto)} de {fmt_euro(limite)})")
+            
+            if alertas:
+                st.markdown("#### 🚨 Alertas de Teto de Gastos")
+                for al in alertas:
+                    if "🚨" in al:
+                        st.error(al)
+                    else:
+                        st.warning(al)
+
     st.markdown("---")
     st.markdown("### 🚀 Acesso Rápido")
     
@@ -207,6 +271,10 @@ if st.session_state.pagina_atual == "🏠 Início":
             st.rerun()
 
     with col2:
+        if st.button("🤖 **Inteligência & IA**\n\nGerar relatórios preditivos com IA", use_container_width=True):
+            st.session_state.pagina_atual = "🤖 Inteligência & IA"
+            st.rerun()
+
         if st.button("➕ **Lançamento Completo**\n\nCom formulário detalhado", use_container_width=True):
             st.session_state.pagina_atual = "➕ Novo Lançamento"
             st.rerun()
@@ -219,9 +287,114 @@ if st.session_state.pagina_atual == "🏠 Início":
             st.session_state.pagina_atual = "🔄 Lançamentos Fixos"
             st.rerun()
 
-        if st.button("📁 **Importar / Exportar**\n\nSubir Excel ou gerar backup", use_container_width=True):
-            st.session_state.pagina_atual = "📁 Importar/Exportar"
-            st.rerun()
+# ---------------------------------------------------------
+# PÁGINA: 🤖 INTELIGÊNCIA & IA
+# ---------------------------------------------------------
+elif st.session_state.pagina_atual == "🤖 Inteligência & IA":
+    st.subheader("🤖 Consultoria Financeira com IA (Google Gemini)")
+    st.caption("Obtenha diagnósticos personalizados sobre o seu perfil de consumo sem nenhum custo adicional.")
+    
+    df_transacoes = carregar_transacoes()
+    
+    if df_transacoes.empty:
+        st.info("Nenhuma transação encontrada para análise.")
+    else:
+        st.markdown("### 📅 Seleção do Período para Análise")
+        
+        tipo_periodo = st.radio(
+            "Selecione o tipo de período:",
+            ["Mês Civil", "Ciclo Salarial", "Intervalo Personalizado"],
+            horizontal=True
+        )
+        
+        hoje = datetime.now().date()
+        df_transacoes['ano_mes'] = df_transacoes['data_transacao'].dt.strftime('%Y-%m')
+        
+        if tipo_periodo == "Mês Civil":
+            meses_disponiveis = sorted(df_transacoes['ano_mes'].unique(), reverse=True)
+            mes_sel = st.selectbox("Selecione o Mês:", meses_disponiveis)
+            df_ia = df_transacoes[df_transacoes['ano_mes'] == mes_sel]
+            rotulo_periodo = f"Mês {mes_sel}"
+            
+        elif tipo_periodo == "Ciclo Salarial":
+            dia_p = st.number_input("Dia habitual do Salário:", min_value=1, max_value=28, value=24, step=1, key="ia_dia_p")
+            dt_i, dt_f = obter_intervalo_ciclo_salarial(hoje, dia_p)
+            df_ia = df_transacoes[(df_transacoes['data_transacao'].dt.date >= dt_i) & (df_transacoes['data_transacao'].dt.date <= dt_f)]
+            rotulo_periodo = f"Ciclo {dt_i.strftime('%d/%m/%Y')} a {dt_f.strftime('%d/%m/%Y')}"
+            
+        else: # Intervalo Personalizado
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                dt_inicio_custom = st.date_input("Data Inicial", value=hoje - timedelta(days=30))
+            with col_d2:
+                dt_fim_custom = st.date_input("Data Final", value=hoje)
+            df_ia = df_transacoes[(df_transacoes['data_transacao'].dt.date >= dt_inicio_custom) & (df_transacoes['data_transacao'].dt.date <= dt_fim_custom)]
+            rotulo_periodo = f"Período de {dt_inicio_custom.strftime('%d/%m/%Y')} a {dt_fim_custom.strftime('%d/%m/%Y')}"
+
+        st.markdown("---")
+        st.markdown(f"#### 📊 Resumo do {rotulo_periodo}")
+        
+        tot_receita = df_ia[df_ia['tipo'] == 'Receita']['valor'].sum()
+        tot_despesa = df_ia[df_ia['tipo'] == 'Despesa']['valor'].sum()
+        
+        # Agrupamento com arredondamento para 2 casas decimais
+        gastos_categoria_raw = df_ia[df_ia['tipo'] == 'Despesa'].groupby('natureza')['valor'].sum().to_dict()
+        gastos_por_categoria = {cat: round(float(val), 2) for cat, val in gastos_categoria_raw.items()}
+        
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("🟢 Receitas", fmt_euro(tot_receita))
+        col_m2.metric("🔴 Despesas", fmt_euro(tot_despesa))
+        col_m3.metric("💳 Saldo do Período", fmt_euro(tot_receita - tot_despesa))
+        
+        st.write("**Gastos por Categoria:**")
+        st.json(gastos_por_categoria)
+        
+        st.markdown("---")
+        st.markdown("### 🔮 Gerar Análise de Saúde Financeira")
+        
+if st.button("✨ Solicitar Análise da IA", use_container_width=True):
+            if not GEMINI_API_KEY:
+                st.error("⚠️ Para ativar a IA gratuita, defina a variável `GEMINI_API_KEY` no seu ficheiro `.env`.")
+            else:
+                with st.spinner("O assistente financeiro está a analisar os dados do período..."):
+                    # Lista de modelos por ordem de preferência
+                    modelos_para_tentar = [
+                        "gemini-3.8-flash",
+                        "gemini-2.5-flash",
+                        "gemini-1.5-flash",
+                        "gemini-2.0-flash"
+                    ]
+                    
+                    prompt = f"""
+                    Atue como um especialista em finanças pessoais.
+                    Analise o resumo financeiro do utilizador para o período de [{rotulo_periodo}] e forneça 3 a 5 conselhos práticos e construtivos em português europeu:
+                    
+                    - Total Recebido: {tot_receita:.2f} EUR
+                    - Total Gasto: {tot_despesa:.2f} EUR
+                    - Detalhamento de Gastos por Categoria: {gastos_por_categoria}
+                    
+                    Mantenha a resposta objetiva, motivadora e estruturada com pontos (bullet points).
+                    """
+                    
+                    client = genai.Client(api_key=GEMINI_API_KEY)
+                    sucesso = False
+                    
+                    for modelo in modelos_para_tentar:
+                        try:
+                            response = client.models.generate_content(
+                                model=modelo,
+                                contents=prompt
+                            )
+                            st.success("Análise concluída com sucesso!")
+                            st.markdown(response.text)
+                            sucesso = True
+                            break # Encerra o loop se a chamada der certo
+                        except Exception as err:
+                            # Se for erro de demanda/disponibilidade, tenta o próximo da lista
+                            continue
+                    
+                    if not sucesso:
+                        st.error("⚠️ O serviço de IA da Google está temporariamente sobrecarregado. Por favor, aguarde alguns instantes e tente novamente.")
 
 # ---------------------------------------------------------
 # PÁGINA: ⚡ LANÇAMENTO RÁPIDO
