@@ -2,7 +2,7 @@ import os
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from dotenv import load_dotenv
 from supabase import create_client, Client
 
@@ -24,7 +24,34 @@ st.set_page_config(page_title="Finanças Pessoais", page_icon="💶", layout="wi
 def fmt_euro(valor: float) -> str:
     return f"€ {valor:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
 
-# 3. Funções de Busca com Paginação para Superar Limite de 1000 Linhas
+# Função para calcular os limites do ciclo salarial com base no dia do provento
+def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
+    ano = dt_referencia.year
+    mes = dt_referencia.month
+    
+    if dt_referencia.day >= dia_provento:
+        # Estamos no ciclo que começou este mês
+        dt_inicio = date(ano, mes, dia_provento)
+        # Próximo mês
+        if mes == 12:
+            dt_fim = date(ano + 1, 1, dia_provento) - timedelta(days=1)
+        else:
+            dt_fim = date(ano, mes + 1, dia_provento) - timedelta(days=1)
+    else:
+        # Estamos no ciclo que começou no mês anterior
+        if mes == 1:
+            dt_inicio = date(ano - 1, 12, dia_provento)
+        else:
+            dt_inicio = date(ano, mes - 1, dia_provento)
+        dt_fim = date(ano, mes, dia_provento) - timedelta(days=1)
+        
+    return dt_inicio, dt_fim
+
+# Controle de navegação das páginas
+if "pagina_atual" not in st.session_state:
+    st.session_state.pagina_atual = "🏠 Início"
+
+# 3. Funções de Busca com Paginação
 @st.cache_data(ttl=60)
 def carregar_tipos():
     response = supabase.table("tipos").select("id, nome").execute()
@@ -48,16 +75,12 @@ def carregar_transacoes():
             .range(inicio, inicio + tamanho_pagina - 1)
             .execute()
         )
-        
         dados = response.data
         if not dados:
             break
-            
         todas_transacoes.extend(dados)
-        
         if len(dados) < tamanho_pagina:
             break
-            
         inicio += tamanho_pagina
     
     if not todas_transacoes:
@@ -95,23 +118,115 @@ def carregar_recorrentes():
 def recarregar_dados():
     st.cache_data.clear()
 
-st.title("💶 Controle Financeiro")
-
 df_tipos = carregar_tipos()
 df_naturezas = carregar_naturezas()
 dict_tipos = dict(zip(df_tipos['nome'], df_tipos['id']))
 dict_naturezas = dict(zip(df_naturezas['nome'], df_naturezas['id']))
 
-# Abas otimizadas para mobile (Lançamento Rápido em primeiro lugar)
-tab_rapido, tab_dash, tab_novo, tab_gestao, tab_metas, tab_recorrentes, tab_cats, tab_import = st.tabs([
-    "⚡ Lançamento Rápido", "📊 Dashboard", "➕ Completo", "✏️ Editar/Eliminar", 
-    "🎯 Metas", "🔄 Fixos", "🏷️ Categorias", "📁 Importar/Exportar"
-])
+# Lista das opções do menu
+OPCOES_MENU = [
+    "🏠 Início",
+    "⚡ Lançamento Rápido",
+    "📊 Dashboard",
+    "➕ Novo Lançamento",
+    "✏️ Editar/Eliminar",
+    "🎯 Metas & Orçamentos",
+    "🔄 Lançamentos Fixos",
+    "🏷️ Categorias",
+    "📁 Importar/Exportar"
+]
+
+st.session_state.pagina_atual = st.selectbox(
+    "Navegação:",
+    OPCOES_MENU,
+    index=OPCOES_MENU.index(st.session_state.pagina_atual) if st.session_state.pagina_atual in OPCOES_MENU else 0
+)
+
+st.markdown("---")
 
 # ---------------------------------------------------------
-# ABA 0: LANÇAMENTO RÁPIDO (MOBILE FIRST)
+# PÁGINA: 🏠 INÍCIO (HOMEPAGE)
 # ---------------------------------------------------------
-with tab_rapido:
+if st.session_state.pagina_atual == "🏠 Início":
+    st.title("💶 Controle Financeiro")
+    
+    df_transacoes = carregar_transacoes()
+    
+    # Configuração do dia do provento na Home
+    dia_provento = st.number_input("📅 Dia habitual do Salário/Provento:", min_value=1, max_value=28, value=24, step=1)
+    
+    if not df_transacoes.empty:
+        hoje = datetime.now().date()
+        
+        # 1. Saldo Acumulado Histórico (Tudo desde o início)
+        tot_rec_total = df_transacoes[df_transacoes['tipo'] == 'Receita']['valor'].sum()
+        tot_desp_total = df_transacoes[df_transacoes['tipo'] == 'Despesa']['valor'].sum()
+        saldo_acumulado = tot_rec_total - tot_desp_total
+        
+        # 2. Ciclo Salarial Vigente
+        dt_inicio_ciclo, dt_fim_ciclo = obter_intervalo_ciclo_salarial(hoje, dia_provento)
+        
+        mask_ciclo = (df_transacoes['data_transacao'].dt.date >= dt_inicio_ciclo) & (df_transacoes['data_transacao'].dt.date <= dt_fim_ciclo)
+        df_ciclo = df_transacoes[mask_ciclo]
+        
+        tot_rec_ciclo = df_ciclo[df_ciclo['tipo'] == 'Receita']['valor'].sum()
+        tot_desp_ciclo = df_ciclo[df_ciclo['tipo'] == 'Despesa']['valor'].sum()
+        saldo_ciclo = tot_rec_ciclo - tot_desp_ciclo
+        
+        # Exibição dos KPIs
+        st.markdown(f"### 🏦 Saldo Geral da Conta: **{fmt_euro(saldo_acumulado)}**")
+        
+        st.caption(f"📊 **Resumo do Ciclo Salarial Atual** ({dt_inicio_ciclo.strftime('%d/%m/%Y')} até {dt_fim_ciclo.strftime('%d/%m/%Y')}):")
+        
+        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+        kpi1.metric("💰 Saldo Bancário Total", fmt_euro(saldo_acumulado))
+        kpi2.metric("🟢 Receitas do Ciclo", fmt_euro(tot_rec_ciclo))
+        kpi3.metric("🔴 Despesas do Ciclo", fmt_euro(tot_desp_ciclo))
+        kpi4.metric("💳 Saldo do Ciclo", fmt_euro(saldo_ciclo))
+    
+    st.markdown("---")
+    st.markdown("### 🚀 Acesso Rápido")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("⚡ **Lançamento Rápido**\n\nRegistrar gasto pelo celular", use_container_width=True):
+            st.session_state.pagina_atual = "⚡ Lançamento Rápido"
+            st.rerun()
+            
+        if st.button("📊 **Dashboard & Gráficos**\n\nVisualizar saldo e análises", use_container_width=True):
+            st.session_state.pagina_atual = "📊 Dashboard"
+            st.rerun()
+
+        if st.button("🎯 **Metas & Orçamentos**\n\nAcompanhar limites do mês", use_container_width=True):
+            st.session_state.pagina_atual = "🎯 Metas & Orçamentos"
+            st.rerun()
+
+        if st.button("🏷️ **Gerenciar Categorias**\n\nCriar novas categorias", use_container_width=True):
+            st.session_state.pagina_atual = "🏷️ Categorias"
+            st.rerun()
+
+    with col2:
+        if st.button("➕ **Lançamento Completo**\n\nCom formulário detalhado", use_container_width=True):
+            st.session_state.pagina_atual = "➕ Novo Lançamento"
+            st.rerun()
+
+        if st.button("✏️ **Editar / Eliminar**\n\nCorrigir lançamentos", use_container_width=True):
+            st.session_state.pagina_atual = "✏️ Editar/Eliminar"
+            st.rerun()
+
+        if st.button("🔄 **Gastos/Receitas Fixas**\n\nContas recorrentes mensais", use_container_width=True):
+            st.session_state.pagina_atual = "🔄 Lançamentos Fixos"
+            st.rerun()
+
+        if st.button("📁 **Importar / Exportar**\n\nSubir Excel ou gerar backup", use_container_width=True):
+            st.session_state.pagina_atual = "📁 Importar/Exportar"
+            st.rerun()
+
+# ---------------------------------------------------------
+# PÁGINA: ⚡ LANÇAMENTO RÁPIDO
+# ---------------------------------------------------------
+elif st.session_state.pagina_atual == "⚡ Lançamento Rápido":
     st.subheader("⚡ Registro Rápido")
     st.caption("Ideal para adicionar lançamentos direto do telemóvel.")
     
@@ -139,9 +254,9 @@ with tab_rapido:
             recarregar_dados()
 
 # ---------------------------------------------------------
-# ABA 1: DASHBOARD
+# PÁGINA: 📊 DASHBOARD
 # ---------------------------------------------------------
-with tab_dash:
+elif st.session_state.pagina_atual == "📊 Dashboard":
     df_transacoes = carregar_transacoes()
     
     if df_transacoes.empty:
@@ -151,13 +266,17 @@ with tab_dash:
         c_f1, c_f2, c_f3 = st.columns([1, 1, 1])
         
         with c_f1:
-            visao_temporal = st.selectbox("Período:", ["Mensal Específico", "Ano Atual (YTD)", "Últimos 12 Meses (L12M)", "Todo o Histórico"])
+            visao_temporal = st.selectbox("Período:", ["Ciclo Salarial Atual", "Mensal Civil", "Ano Atual (YTD)", "Últimos 12 Meses (L12M)", "Todo o Histórico"])
         
-        hoje = datetime.now()
+        hoje = datetime.now().date()
         df_filtrado = df_transacoes.copy()
-        mes_selecionado = hoje.strftime('%Y-%m')
         
-        if visao_temporal == "Mensal Específico":
+        if visao_temporal == "Ciclo Salarial Atual":
+            dia_p = st.number_input("Dia do Salário:", min_value=1, max_value=28, value=24, step=1, key="dash_dia_p")
+            dt_i, dt_f = obter_intervalo_ciclo_salarial(hoje, dia_p)
+            df_filtrado = df_filtrado[(df_filtrado['data_transacao'].dt.date >= dt_i) & (df_filtrado['data_transacao'].dt.date <= dt_f)]
+            st.caption(f"Exibindo dados do ciclo: **{dt_i.strftime('%d/%m/%Y')}** até **{dt_f.strftime('%d/%m/%Y')}**")
+        elif visao_temporal == "Mensal Civil":
             df_transacoes['ano_mes'] = df_transacoes['data_transacao'].dt.strftime('%Y-%m')
             meses_disponiveis = sorted(df_transacoes['ano_mes'].unique(), reverse=True)
             mes_selecionado = st.selectbox("Selecione o Mês:", meses_disponiveis)
@@ -165,7 +284,7 @@ with tab_dash:
         elif visao_temporal == "Ano Atual (YTD)":
             df_filtrado = df_filtrado[df_filtrado['data_transacao'].dt.year == hoje.year]
         elif visao_temporal == "Últimos 12 Meses (L12M)":
-            df_filtrado = df_filtrado[df_filtrado['data_transacao'] >= (hoje - timedelta(days=365))]
+            df_filtrado = df_filtrado[df_filtrado['data_transacao'].dt.date >= (hoje - timedelta(days=365))]
 
         with c_f2:
             naturezas_sel = st.multiselect("Natureza / Categoria:", sorted(df_transacoes['natureza'].unique()), default=[])
@@ -179,50 +298,28 @@ with tab_dash:
 
         st.markdown("---")
 
+        total_receita_hist = df_transacoes[df_transacoes['tipo'] == 'Receita']['valor'].sum()
+        total_despesa_hist = df_transacoes[df_transacoes['tipo'] == 'Despesa']['valor'].sum()
+        saldo_total_banco = total_receita_hist - total_despesa_hist
+
         total_receita = df_filtrado[df_filtrado['tipo'] == 'Receita']['valor'].sum()
         total_despesa = df_filtrado[df_filtrado['tipo'] == 'Despesa']['valor'].sum()
-        saldo = total_receita - total_despesa
+        saldo_periodo = total_receita - total_despesa
         
-        col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-        col_kpi1.metric("🟢 Receitas", fmt_euro(total_receita))
-        col_kpi2.metric("🔴 Despesas", fmt_euro(total_despesa))
-        col_kpi3.metric("💳 Saldo do Período", fmt_euro(saldo))
+        col_kpi0, col_kpi1, col_kpi2, col_kpi3 = st.columns(4)
+        col_kpi0.metric("💰 Saldo Bancário Real", fmt_euro(saldo_total_banco))
+        col_kpi1.metric("🟢 Receitas Período", fmt_euro(total_receita))
+        col_kpi2.metric("🔴 Despesas Período", fmt_euro(total_despesa))
+        col_kpi3.metric("💳 Saldo Período", fmt_euro(saldo_periodo))
         
         st.markdown("---")
-        
-        if visao_temporal == "Mensal Específico":
-            df_orc = carregar_orcametos(mes_selecionado)
-            if not df_orc.empty:
-                st.subheader(f"🎯 Acompanhamento de Orçamento ({mes_selecionado})")
-                df_desp_mes = df_filtrado[df_filtrado['tipo'] == 'Despesa'].groupby('natureza')['valor'].sum().reset_index()
-                
-                df_meta_comp = pd.merge(df_orc, df_desp_mes, on='natureza', how='left').fillna(0)
-                
-                cols = st.columns(2)
-                for i, row in df_meta_comp.iterrows():
-                    gasto = row['valor']
-                    limite = row['valor_limite']
-                    pct = min(gasto / limite, 1.0) if limite > 0 else 0.0
-                    
-                    with cols[i % 2]:
-                        if gasto > limite:
-                            excesso = gasto - limite
-                            st.error(f"❌ **{row['natureza']}**: {fmt_euro(gasto)} de {fmt_euro(limite)}")
-                            st.progress(1.0)
-                            st.caption(f"🚨 **Limite ultrapassado em {fmt_euro(excesso)}!**")
-                        else:
-                            restante = limite - gasto
-                            st.success(f"✅ **{row['natureza']}**: {fmt_euro(gasto)} de {fmt_euro(limite)}")
-                            st.progress(pct)
-                            st.caption(f"💡 Disponível: **{fmt_euro(restante)}**")
-                st.markdown("---")
 
         col_graf1, col_graf2 = st.columns(2)
         with col_graf1:
             st.subheader("🥧 Despesas por Categoria")
             df_despesas = df_filtrado[df_filtrado['tipo'] == 'Despesa']
             if df_despesas.empty:
-                st.info("Sem despesas no período.")
+                st.info("Sem despesas no período selecionado.")
             else:
                 df_cat = df_despesas.groupby('natureza')['valor'].sum().reset_index()
                 fig_pie = px.pie(df_cat, values='valor', names='natureza', hole=0.4, color_discrete_sequence=px.colors.qualitative.Set3)
@@ -249,9 +346,9 @@ with tab_dash:
         st.dataframe(df_exibicao, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
-# ABA 2: NOVO LANÇAMENTO COMPLETO
+# PÁGINA: ➕ NOVO LANÇAMENTO
 # ---------------------------------------------------------
-with tab_novo:
+elif st.session_state.pagina_atual == "➕ Novo Lançamento":
     st.subheader("➕ Novo Lançamento Completo")
     with st.form("form_transacao", clear_on_submit=True):
         c1, c2 = st.columns(2)
@@ -275,9 +372,9 @@ with tab_novo:
                 recarregar_dados()
 
 # ---------------------------------------------------------
-# ABA 3: EDITAR OU ELIMINAR
+# PÁGINA: ✏️ EDITAR/ELIMINAR
 # ---------------------------------------------------------
-with tab_gestao:
+elif st.session_state.pagina_atual == "✏️ Editar/Eliminar":
     st.subheader("✏️ Editar ou Eliminar Lançamento")
     df_gest = carregar_transacoes()
     if not df_gest.empty:
@@ -311,9 +408,9 @@ with tab_gestao:
                 st.rerun()
 
 # ---------------------------------------------------------
-# ABA 4: METAS E ORÇAMENTOS
+# PÁGINA: 🎯 METAS & ORÇAMENTOS
 # ---------------------------------------------------------
-with tab_metas:
+elif st.session_state.pagina_atual == "🎯 Metas & Orçamentos":
     st.subheader("🎯 Definir Meta / Teto de Gastos por Categoria")
     col_m1, col_m2 = st.columns(2)
     
@@ -352,11 +449,10 @@ with tab_metas:
             st.info(f"Nenhuma meta cadastrada para {ano_mes_meta}.")
 
 # ---------------------------------------------------------
-# ABA 5: DESPESAS RECORRENTES / FIXAS
+# PÁGINA: 🔄 LANÇAMENTOS FIXOS
 # ---------------------------------------------------------
-with tab_recorrentes:
+elif st.session_state.pagina_atual == "🔄 Lançamentos Fixos":
     st.subheader("🔄 Cadastro de Despesas e Receitas Fixas")
-    
     col_r1, col_r2 = st.columns(2)
     with col_r1:
         st.markdown("**Cadastrar Novo Gasto/Receita Fixo:**")
@@ -410,11 +506,10 @@ with tab_recorrentes:
                 recarregar_dados()
 
 # ---------------------------------------------------------
-# ABA 6: GESTÃO DE CATEGORIAS (NATUREZAS)
+# PÁGINA: 🏷️ CATEGORIAS
 # ---------------------------------------------------------
-with tab_cats:
+elif st.session_state.pagina_atual == "🏷️ Categorias":
     st.subheader("🏷️ Gerenciar Categorias (Naturezas)")
-    
     c_cat1, c_cat2 = st.columns(2)
     with c_cat1:
         st.markdown("**Adicionar Nova Categoria:**")
@@ -434,11 +529,10 @@ with tab_cats:
         st.dataframe(df_naturezas[['id', 'nome']].rename(columns={'id': 'ID', 'nome': 'Nome'}), use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
-# ABA 7: IMPORTAR E EXPORTAR DADOS
+# PÁGINA: 📁 IMPORTAR/EXPORTAR
 # ---------------------------------------------------------
-with tab_import:
+elif st.session_state.pagina_atual == "📁 Importar/Exportar":
     st.subheader("📁 Importação e Exportação de Histórico")
-    
     col_imp, col_exp = st.columns(2)
     
     with col_imp:
@@ -475,12 +569,10 @@ with tab_import:
                         progress_bar = st.progress(0)
                         total_rows = len(df_up)
                         inseridos = 0
-                        
                         dict_nat_local = dict_naturezas.copy()
                         
                         for idx, row in df_up.iterrows():
                             cat_nome = str(row['natureza']).strip()
-                            
                             if cat_nome not in dict_nat_local:
                                 res_cat = supabase.table("naturezas").insert({"nome": cat_nome}).execute()
                                 if res_cat.data:
