@@ -7,26 +7,36 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from google import genai
 
-# 1. Carregar variáveis de ambiente
+# ---------------------------------------------------------
+# 1. CONFIGURAÇÃO INICIAL E VARIÁVEIS DE AMBIENTE
+# ---------------------------------------------------------
 load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Opcional: Adicione a sua chave no .env para ativar a IA
+SUPABASE_URL = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
 
-# 2. Conectar ao Supabase
+st.set_page_config(
+    page_title="Finanças Pessoais", 
+    page_icon="💶", 
+    layout="wide", 
+    initial_sidebar_state="expanded"
+)
+
+# ---------------------------------------------------------
+# 2. CONEXÃO E CLIENTE SUPABASE
+# ---------------------------------------------------------
 @st.cache_resource
-def init_supabase() -> Client:
+def obter_cliente_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
 
-supabase = init_supabase()
+supabase = obter_cliente_supabase()
 
-st.set_page_config(page_title="Finanças Pessoais", page_icon="💶", layout="wide", initial_sidebar_state="collapsed")
-
-# Função auxiliar para formatar moeda em Euro (€)
+# ---------------------------------------------------------
+# 3. FUNÇÕES AUXILIARES
+# ---------------------------------------------------------
 def fmt_euro(valor: float) -> str:
     return f"€ {valor:,.2f}".replace(",", "v").replace(".", ",").replace("v", ".")
 
-# Função para calcular os limites do ciclo salarial com base no dia do provento
 def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
     ano = dt_referencia.year
     mes = dt_referencia.month
@@ -46,11 +56,12 @@ def obter_intervalo_ciclo_salarial(dt_referencia: date, dia_provento: int):
         
     return dt_inicio, dt_fim
 
-# Controle de navegação das páginas
-if "pagina_atual" not in st.session_state:
-    st.session_state.pagina_atual = "🏠 Início"
+def recarregar_dados():
+    st.cache_data.clear()
 
-# 3. Funções de Busca com Paginação
+# ---------------------------------------------------------
+# 4. CONSULTAS AO BANCO DE DADOS (SUPABASE)
+# ---------------------------------------------------------
 @st.cache_data(ttl=60)
 def carregar_tipos():
     response = supabase.table("tipos").select("id, nome").execute()
@@ -114,35 +125,69 @@ def carregar_recorrentes():
     df['valor'] = df['valor'].astype(float)
     return df.drop(columns=['tipos', 'naturezas'])
 
-def recarregar_dados():
-    st.cache_data.clear()
+def carregar_cofres():
+    try:
+        res = supabase.table("cofres").select("*").order("id").execute()
+        return pd.DataFrame(res.data) if res.data else pd.DataFrame()
+    except Exception as e:
+        st.error(f"Erro ao carregar cofres: {e}")
+        return pd.DataFrame()
 
+def criar_cofre(nome, meta_total, meta_mensal, valor_inicial, cor):
+    try:
+        supabase.table("cofres").insert({
+            "nome": nome,
+            "meta_total": meta_total,
+            "meta_mensal": meta_mensal,
+            "valor_atual": valor_inicial,
+            "cor_badge": cor
+        }).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao criar cofre: {e}")
+        return False
+
+def atualizar_valor_cofre(cofre_id, novo_valor):
+    try:
+        supabase.table("cofres").update({"valor_atual": novo_valor}).eq("id", cofre_id).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao atualizar cofre: {e}")
+        return False
+
+# Carregamento prévio de opções estáticas
 df_tipos = carregar_tipos()
 df_naturezas = carregar_naturezas()
 dict_tipos = dict(zip(df_tipos['nome'], df_tipos['id']))
 dict_naturezas = dict(zip(df_naturezas['nome'], df_naturezas['id']))
 
-# Lista das opções do menu
+# ---------------------------------------------------------
+# 5. MENU DE NAVEGAÇÃO
+# ---------------------------------------------------------
+if "pagina_atual" not in st.session_state:
+    st.session_state.pagina_atual = "🏠 Início"
+
 OPCOES_MENU = [
     "🏠 Início",
-    "🤖 Inteligência & IA",
     "⚡ Lançamento Rápido",
-    "📊 Dashboard",
     "➕ Novo Lançamento",
     "✏️ Editar/Eliminar",
+    "📊 Dashboard",
+    "🤖 Inteligência & IA",
     "🎯 Metas & Orçamentos",
     "🔄 Lançamentos Fixos",
+    "🏦 Investimentos & Reservas",
     "🏷️ Categorias",
     "📁 Importar/Exportar"
 ]
 
-st.session_state.pagina_atual = st.selectbox(
-    "Navegação:",
+# Renderização do menu na barra lateral
+st.sidebar.title("📌 Navegação")
+st.session_state.pagina_atual = st.sidebar.radio(
+    "Ir para:",
     OPCOES_MENU,
     index=OPCOES_MENU.index(st.session_state.pagina_atual) if st.session_state.pagina_atual in OPCOES_MENU else 0
 )
-
-st.markdown("---")
 
 # ---------------------------------------------------------
 # PÁGINA: 🏠 INÍCIO (HOMEPAGE)
@@ -153,18 +198,15 @@ if st.session_state.pagina_atual == "🏠 Início":
     df_transacoes = carregar_transacoes()
     df_recorrentes = carregar_recorrentes()
     
-    # Configuração do dia do provento na Home
     dia_provento = st.number_input("📅 Dia habitual do Salário/Provento:", min_value=1, max_value=28, value=24, step=1)
     
     if not df_transacoes.empty:
         hoje = datetime.now().date()
         
-        # 1. Saldo Acumulado Histórico
         tot_rec_total = df_transacoes[df_transacoes['tipo'] == 'Receita']['valor'].sum()
         tot_desp_total = df_transacoes[df_transacoes['tipo'] == 'Despesa']['valor'].sum()
         saldo_acumulado = tot_rec_total - tot_desp_total
         
-        # 2. Ciclo Salarial Vigente
         dt_inicio_ciclo, dt_fim_ciclo = obter_intervalo_ciclo_salarial(hoje, dia_provento)
         mask_ciclo = (df_transacoes['data_transacao'].dt.date >= dt_inicio_ciclo) & (df_transacoes['data_transacao'].dt.date <= dt_fim_ciclo)
         df_ciclo = df_transacoes[mask_ciclo]
@@ -173,34 +215,28 @@ if st.session_state.pagina_atual == "🏠 Início":
         tot_desp_ciclo = df_ciclo[df_ciclo['tipo'] == 'Despesa']['valor'].sum()
         saldo_ciclo = tot_rec_ciclo - tot_desp_ciclo
 
-        # 3. MÓDULO PREDITIVO DE INTELIGÊNCIA FINANCEIRA
         dias_totais_ciclo = max(1, (dt_fim_ciclo - dt_inicio_ciclo).days + 1)
         dias_decorridos = max(1, (hoje - dt_inicio_ciclo).days + 1)
         dias_restantes = max(0, (dt_fim_ciclo - hoje).days + 1)
 
-        # Identificar Despesas Fixas Pendentes no Ciclo
         fixas_pendentes = 0.0
         if not df_recorrentes.empty:
             rec_despesas = df_recorrentes[df_recorrentes['tipo'] == 'Despesa']
             for _, row_r in rec_despesas.iterrows():
                 dia_v = int(row_r['dia_vencimento'])
-                # Verifica se o vencimento está no período restante do ciclo
                 if dia_v >= hoje.day:
                     ja_pago = df_ciclo[(df_ciclo['tipo'] == 'Despesa') & (df_ciclo['descricao'].str.contains(row_r['descricao'], case=False, na=False))]
                     if ja_pago.empty:
                         fixas_pendentes += float(row_r['valor'])
 
-        # Média de Gasto Diário Variável
         despesas_fixas_nomes = df_recorrentes['descricao'].tolist() if not df_recorrentes.empty else []
         df_variavel = df_ciclo[(df_ciclo['tipo'] == 'Despesa') & (~df_ciclo['descricao'].isin(despesas_fixas_nomes))]
         gasto_variavel_total = df_variavel['valor'].sum()
         media_diaria = gasto_variavel_total / dias_decorridos
         
-        # Projeção de Saldo Final
         prev_gastos_restantes = (media_diaria * dias_restantes) + fixas_pendentes
         saldo_previsto_final = saldo_acumulado - prev_gastos_restantes
 
-        # Exibição dos KPIs
         st.markdown(f"### 🏦 Saldo Geral da Conta: **{fmt_euro(saldo_acumulado)}**")
         st.caption(f"📊 **Resumo do Ciclo Salarial Atual** ({dt_inicio_ciclo.strftime('%d/%m/%Y')} até {dt_fim_ciclo.strftime('%d/%m/%Y')}):")
         
@@ -222,7 +258,6 @@ if st.session_state.pagina_atual == "🏠 Início":
             delta_color="normal" if saldo_previsto_final >= 0 else "inverse"
         )
 
-        # ALERTAS DE ORÇAMENTO DA PÁGINA "METAS & ORÇAMENTOS"
         ano_mes_atual = hoje.strftime('%Y-%m')
         df_orc = carregar_orcametos(ano_mes_atual)
         if not df_orc.empty and not df_ciclo.empty:
@@ -252,7 +287,6 @@ if st.session_state.pagina_atual == "🏠 Início":
     st.markdown("### 🚀 Acesso Rápido")
     
     col1, col2 = st.columns(2)
-    
     with col1:
         if st.button("⚡ **Lançamento Rápido**\n\nRegistrar gasto pelo celular", use_container_width=True):
             st.session_state.pagina_atual = "⚡ Lançamento Rápido"
@@ -337,7 +371,6 @@ elif st.session_state.pagina_atual == "🤖 Inteligência & IA":
         tot_receita = df_ia[df_ia['tipo'] == 'Receita']['valor'].sum()
         tot_despesa = df_ia[df_ia['tipo'] == 'Despesa']['valor'].sum()
         
-        # Agrupamento com arredondamento para 2 casas decimais
         gastos_categoria_raw = df_ia[df_ia['tipo'] == 'Despesa'].groupby('natureza')['valor'].sum().to_dict()
         gastos_por_categoria = {cat: round(float(val), 2) for cat, val in gastos_categoria_raw.items()}
         
@@ -352,16 +385,15 @@ elif st.session_state.pagina_atual == "🤖 Inteligência & IA":
         st.markdown("---")
         st.markdown("### 🔮 Gerar Análise de Saúde Financeira")
         
-if st.button("✨ Solicitar Análise da IA", use_container_width=True):
+        # O BOTÃO DE IA ESTÁ EXCLUSIVAMENTE DENTRO DESSA ABA
+        if st.button("✨ Solicitar Análise da IA", use_container_width=True):
             if not GEMINI_API_KEY:
-                st.error("⚠️ Para ativar a IA gratuita, defina a variável `GEMINI_API_KEY` no seu ficheiro `.env`.")
+                st.error("⚠️ Para ativar a IA gratuita, defina a variável `GEMINI_API_KEY` nos Secrets do Streamlit ou no `.env`.")
             else:
                 with st.spinner("O assistente financeiro está a analisar os dados do período..."):
-                    # Lista de modelos por ordem de preferência
                     modelos_para_tentar = [
-                        "gemini-3.8-flash",
-                        "gemini-2.5-flash",
                         "gemini-1.5-flash",
+                        "gemini-2.5-flash",
                         "gemini-2.0-flash"
                     ]
                     
@@ -388,9 +420,8 @@ if st.button("✨ Solicitar Análise da IA", use_container_width=True):
                             st.success("Análise concluída com sucesso!")
                             st.markdown(response.text)
                             sucesso = True
-                            break # Encerra o loop se a chamada der certo
-                        except Exception as err:
-                            # Se for erro de demanda/disponibilidade, tenta o próximo da lista
+                            break
+                        except Exception:
                             continue
                     
                     if not sucesso:
@@ -677,6 +708,80 @@ elif st.session_state.pagina_atual == "🔄 Lançamentos Fixos":
                 
                 st.success(f"Sucesso! {novos_inseridos} lançamentos fixos foram inseridos em {mes_proc}.")
                 recarregar_dados()
+
+# ---------------------------------------------------------
+# PÁGINA: 🏦 INVESTIMENTOS & RESERVAS
+# ---------------------------------------------------------
+elif st.session_state.pagina_atual == "🏦 Investimentos & Reservas":
+    st.subheader("🏦 Cofres Virtuais & Metas de Poupança")
+    st.caption("Organize seus objetivos financeiros, defina metas mensais e acompanhe a evolução dos seus aportes.")
+
+    with st.expander("➕ Criar Novo Cofre Virtuais", expanded=False):
+        with st.form("form_novo_cofre", clear_on_submit=True):
+            col_c1, col_c2 = st.columns(2)
+            with col_c1:
+                nome_cofre = st.text_input("Nome do Cofre (ex: Reserva de Emergência, Viagem)")
+                meta_total = st.number_input("Meta Total (€)", min_value=1.0, value=1000.0, step=50.0)
+            with col_c2:
+                meta_mensal = st.number_input("Meta de Aporte Mensal (€)", min_value=0.0, value=100.0, step=10.0)
+                valor_inicial = st.number_input("Valor Inicial Guardado (€)", min_value=0.0, value=0.0, step=10.0)
+                cor_badge = st.selectbox("Ícone/Cor", ["🛡️ Reserva", "✈️ Viagem", "🏠 Casa", "🚗 Carro", "🎓 Estudos", "🎯 Outro"])
+            
+            submetido_cofre = st.form_submit_button("Guardar Cofre", use_container_width=True)
+            if submetido_cofre:
+                if nome_cofre.strip() == "":
+                    st.warning("Insira um nome para o cofre.")
+                else:
+                    if criar_cofre(nome_cofre, meta_total, meta_mensal, valor_inicial, cor_badge):
+                        st.success(f"Cofre '{nome_cofre}' criado com sucesso!")
+                        st.rerun()
+
+    st.markdown("---")
+    
+    df_cofres = carregar_cofres()
+    
+    if df_cofres.empty:
+        st.info("Você ainda não possui nenhum cofre criado. Clique acima em 'Criar Novo Cofre' para começar!")
+    else:
+        tot_guardado = df_cofres['valor_atual'].sum()
+        tot_metas = df_cofres['meta_total'].sum()
+        pct_global = (tot_guardado / tot_metas * 100) if tot_metas > 0 else 0
+        
+        m1, m2, m3 = st.columns(3)
+        m1.metric("💰 Total Guardado nos Cofres", fmt_euro(tot_guardado))
+        m2.metric("🎯 Meta Global dos Cofres", fmt_euro(tot_metas))
+        m3.metric("📊 Progresso Geral", f"{pct_global:.1f}%")
+        
+        st.write("### Meus Cofres")
+        
+        cols = st.columns(2)
+        for idx, row in df_cofres.iterrows():
+            col_target = cols[idx % 2]
+            with col_target:
+                with st.container(border=True):
+                    st.markdown(f"#### {row['cor_badge']} {row['nome']}")
+                    
+                    v_atual = float(row['valor_atual'])
+                    m_total = float(row['meta_total'])
+                    m_mensal = float(row['meta_mensal'])
+                    
+                    pct = min(1.0, v_atual / m_total) if m_total > 0 else 0.0
+                    
+                    st.progress(pct, text=f"Progresso: {v_atual:.2f}€ / {m_total:.2f}€ ({pct * 100:.1f}%)")
+                    
+                    if m_mensal > 0:
+                        st.caption(f"📌 Meta de Aporte Mensal: **{m_mensal:.2f}€**")
+                    
+                    with st.popover("💵 Depositar / Retirar", use_container_width=True):
+                        st.write(f"**Ajustar saldo do cofre:** {row['nome']}")
+                        tipo_op = st.radio("Operação", ["Depositar", "Retirar"], key=f"op_{row['id']}", horizontal=True)
+                        val_op = st.number_input("Valor (€)", min_value=0.01, value=50.0, step=5.0, key=f"val_{row['id']}")
+                        
+                        if st.button("Confirmar Movimentação", key=f"btn_{row['id']}", use_container_width=True):
+                            novo_saldo = v_atual + val_op if tipo_op == "Depositar" else max(0.0, v_atual - val_op)
+                            if atualizar_valor_cofre(row['id'], novo_saldo):
+                                st.success("Saldo atualizado com sucesso!")
+                                st.rerun()
 
 # ---------------------------------------------------------
 # PÁGINA: 🏷️ CATEGORIAS
