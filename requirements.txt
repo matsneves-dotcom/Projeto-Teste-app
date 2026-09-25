@@ -4,3 +4,4 @@ plotly
 python-dotenv
 supabase
 openpyxl
+google-genai 
